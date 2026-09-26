@@ -39,6 +39,7 @@ export function VoiceStudio({
   const [voiceId, setVoiceId] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [last, setLast] = useState<{ id: string; text: string; downloadable: boolean } | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -83,8 +84,12 @@ export function VoiceStudio({
       } else {
         // No clone available, so speak it with the browser voice and say so.
         if ("speechSynthesis" in window) window.speechSynthesis.speak(new SpeechSynthesisUtterance(line));
-        setNotice(body.notice ?? "Spoken in the preview voice — no cloned voice was used.");
+        setNotice(
+          body.notice ??
+            "Spoken in the preview voice — no cloned voice was used, so there's no file to save.",
+        );
       }
+      setLast({ id: body.id, text: line, downloadable: Boolean(body.downloadable) });
       setText("");
       void refresh();
     } catch (err) {
@@ -136,6 +141,58 @@ export function VoiceStudio({
             {busy ? "Rendering…" : "Speak it"}
           </button>
         </div>
+        {last && (
+          <div
+            className="fade-pop mt-4 flex flex-wrap items-center justify-between gap-3"
+            style={{
+              padding: "14px 16px",
+              borderRadius: "var(--radius-md)",
+              background: "var(--surface-sunken)",
+              border: "1px solid var(--border)",
+            }}
+          >
+            <div className="min-w-0">
+              <div className="mono-label" style={{ color: "var(--text-tertiary)", marginBottom: 4 }}>
+                Last render
+              </div>
+              <div style={{ lineHeight: "var(--lh-snug)" }}>{last.text}</div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              {last.downloadable ? (
+                <>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    style={{ fontSize: "var(--fs-small)" }}
+                    onClick={() => void new Audio(`/api/generations/${last.id}/audio`).play().catch(() => {})}
+                  >
+                    Play again
+                  </button>
+                  <a
+                    className="btn btn-secondary"
+                    style={{ fontSize: "var(--fs-small)", padding: "9px 18px" }}
+                    href={`/api/generations/${last.id}/audio`}
+                  >
+                    Save audio
+                  </a>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ fontSize: "var(--fs-small)" }}
+                  onClick={() => {
+                    if ("speechSynthesis" in window)
+                      window.speechSynthesis.speak(new SpeechSynthesisUtterance(last.text));
+                  }}
+                >
+                  Play again
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
         {notice && (
           <div className="preview-voice-note fade-pop mt-4" style={{ color: "var(--caution)" }}>
             <InfoIcon />

@@ -11,8 +11,6 @@ export const maxDuration = 60;
 const CANDIDATES = [
   "https://myshell-ai-openvoice.hf.space",
   "https://myshell-ai-openvoicev2.hf.space",
-  "https://kevinwang676-openvoice.hf.space",
-  "https://awacke1-cloneanyvoice.hf.space",
 ];
 
 async function probe(base: string) {
@@ -24,7 +22,7 @@ async function probe(base: string) {
     out.root = e instanceof Error ? e.name : "failed";
   }
 
-  for (const path of ["/gradio_api/info", "/info", "/config"]) {
+  for (const path of ["/info", "/config"]) {
     try {
       const res = await fetch(`${base}${path}`, { signal: AbortSignal.timeout(12_000) });
       out[path] = res.status;
@@ -32,19 +30,26 @@ async function probe(base: string) {
         const body = await res.text();
         try {
           const json = JSON.parse(body) as Record<string, unknown>;
-          const named = (json.named_endpoints ?? {}) as Record<string, unknown>;
-          const names = Object.keys(named);
-          if (names.length) {
-            out.endpoints = names;
-            // Record the parameter shape of the first endpoint so the call
-            // body can be built from fact rather than guessed.
-            const first = named[names[0]] as { parameters?: { label?: string; type?: string }[] };
-            out.firstSignature = first?.parameters?.map((p) => `${p.label}:${p.type}`);
-          } else if (json.dependencies) {
-            out.depCount = (json.dependencies as unknown[]).length;
+          if (path === "/info") {
+            const named = (json.named_endpoints ?? {}) as Record<string, unknown>;
+            const unnamed = (json.unnamed_endpoints ?? {}) as Record<string, unknown>;
+            out.namedEndpoints = Object.keys(named);
+            out.unnamedEndpoints = Object.keys(unnamed);
+            const pick = (Object.values(named)[0] ?? Object.values(unnamed)[0]) as
+              | { parameters?: { label?: string; type?: string; python_type?: { type?: string } }[];
+                  returns?: { label?: string; type?: string }[] }
+              | undefined;
+            out.signature = pick?.parameters?.map(
+              (x) => `${x.label}:${x.type ?? x.python_type?.type}`,
+            );
+            out.returns = pick?.returns?.map((x) => `${x.label}:${x.type}`);
+          } else {
+            out.gradioVersion = json.version;
+            const deps = (json.dependencies ?? []) as { api_name?: string | null }[];
+            out.apiNames = deps.map((d) => d.api_name ?? null);
           }
         } catch {
-          out[`${path}_snippet`] = body.slice(0, 160);
+          out[`${path}_snippet`] = body.slice(0, 200);
         }
       }
     } catch (e) {
