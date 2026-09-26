@@ -2,6 +2,7 @@
 
 import { useCallback, useState } from "react";
 import { VoiceRecorder } from "./VoiceRecorder";
+import { VoiceCatalogue } from "./VoiceCatalogue";
 import { FormError } from "@/components/auth/FormError";
 import { CloseIcon, InfoIcon } from "@/components/ui/icons";
 import {
@@ -250,6 +251,11 @@ export function VoiceStudio({
           </div>
         )}
         <FormError message={error} />
+      </div>
+
+      {/* ---- preview voice catalogue ---- */}
+      <div className="mb-6">
+        <VoiceCatalogue />
       </div>
 
       {/* ---- record ---- */}

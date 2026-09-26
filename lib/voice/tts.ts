@@ -1,6 +1,8 @@
 "use client";
 
 import { synthesiseInBrowser } from "./openvoiceBrowser";
+import { TONE_PRESETS } from "./presets";
+import { useAssistant } from "@/lib/store/assistantStore";
 
 /**
  * One interface, two providers. OpenVoice is the real cloned voice; the
@@ -48,11 +50,27 @@ class BrowserVoice implements TtsProvider {
     synth.cancel();
 
     const utter = new SpeechSynthesisUtterance(text);
-    const preferred =
-      voices.find((v) => v.lang?.startsWith("en") && v.localService) ??
-      voices.find((v) => v.lang?.startsWith("en")) ??
-      voices[0];
-    if (preferred) utter.voice = preferred;
+
+    // Honour a voice picked from the catalogue; otherwise fall back to a
+    // sensible English default so replies always have a voice.
+    const chosen = useAssistant.getState().previewVoiceId;
+    const [chosenUri, chosenTone] = chosen?.split("::") ?? [];
+    const fromCatalogue = chosenUri ? voices.find((v) => v.voiceURI === chosenUri) : undefined;
+
+    if (fromCatalogue) {
+      utter.voice = fromCatalogue;
+      const tone = TONE_PRESETS.find((t) => t.id === chosenTone);
+      if (tone) {
+        utter.rate = tone.rate;
+        utter.pitch = tone.pitch;
+      }
+    } else {
+      const preferred =
+        voices.find((v) => v.lang?.startsWith("en") && v.localService) ??
+        voices.find((v) => v.lang?.startsWith("en")) ??
+        voices[0];
+      if (preferred) utter.voice = preferred;
+    }
 
     let settled = false;
     const finish = () => {

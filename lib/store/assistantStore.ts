@@ -22,6 +22,9 @@ export type AssistantState = {
   /** Session-only theme override (§4 — deliberately not persisted). */
   theme: "light" | "dark" | null;
 
+  /** Chosen catalogue voice ("<voiceURI>::<toneId>"), or null for the default. */
+  previewVoiceId: string | null;
+
   /** Voice-clone state. `voiceNotice` is surfaced in the UI, never console-only. */
   voiceSource: VoiceSource;
   voiceNotice: string | null;
@@ -37,6 +40,7 @@ export type AssistantState = {
   toggleHistory: (open?: boolean) => void;
   setTextMode: (on: boolean) => void;
   setTheme: (t: "light" | "dark") => void;
+  setPreviewVoiceId: (id: string | null) => void;
   setVoiceSource: (s: VoiceSource, notice?: string | null) => void;
   setCloneReady: (ready: boolean) => void;
   reset: () => void;
@@ -53,6 +57,7 @@ export const useAssistant = create<AssistantState>((set) => ({
   historyOpen: false,
   textMode: false,
   theme: null,
+  previewVoiceId: null,
   voiceSource: "preview",
   voiceNotice: null,
   cloneReady: false,
@@ -67,6 +72,7 @@ export const useAssistant = create<AssistantState>((set) => ({
   toggleHistory: (open) => set((s) => ({ historyOpen: open ?? !s.historyOpen })),
   setTextMode: (textMode) => set({ textMode }),
   setTheme: (theme) => set({ theme }),
+  setPreviewVoiceId: (previewVoiceId) => set({ previewVoiceId }),
   setVoiceSource: (voiceSource, voiceNotice = null) => set({ voiceSource, voiceNotice }),
   setCloneReady: (cloneReady) => set({ cloneReady }),
   reset: () => set({ status: "idle", turns: [], liveText: "", historyOpen: false }),
