@@ -1,9 +1,10 @@
 import { headers } from "next/headers";
 import { getSessionSafe } from "@/lib/auth/session";
 import { db, newId } from "@/lib/db";
-import { synthesise } from "@/lib/voice/openvoice";
 
-export const maxDuration = 45;
+export const maxDuration = 30;
+
+const MAX_AUDIO_BYTES = 12 * 1024 * 1024;
 
 export async function GET() {
   const session = await getSessionSafe(await headers());
@@ -24,63 +25,58 @@ export async function GET() {
 }
 
 /**
- * Renders a line in a chosen voice. A cloned voice goes to OpenVoice; if
- * that fails the row is still recorded with source 'preview' and no audio,
- * so the client knows to fall back to the browser voice AND the user can
- * see in the history that it was not actually their clone.
+ * Records a rendered line.
+ *
+ * The Space's endpoint is queued, so synthesis happens in the browser (see
+ * lib/voice/openvoiceBrowser.ts) and the finished audio is posted here as
+ * multipart. A JSON body means the preview voice was used and there is no
+ * file to keep. The server deliberately does not call the Space itself: a
+ * queued Gradio endpoint needs a websocket and can outrun the function's
+ * 60s ceiling.
  */
 export async function POST(req: Request) {
   const session = await getSessionSafe(await headers());
   if (!session) return Response.json({ error: "unauthorized" }, { status: 401 });
 
-  const { text, voiceId } = (await req.json()) as { text?: string; voiceId?: string | null };
-  if (!text?.trim()) return Response.json({ error: "Nothing to say." }, { status: 400 });
-  if (text.length > 1000) {
-    return Response.json({ error: "Keep it under 1000 characters." }, { status: 413 });
-  }
-
   const id = newId("gen");
+  const contentType = req.headers.get("content-type") ?? "";
 
-  // No cloned voice chosen: record the intent, let the client speak it.
-  if (!voiceId) {
+  if (contentType.includes("multipart/form-data")) {
+    const form = await req.formData();
+    const text = String(form.get("text") ?? "").trim();
+    const voiceId = String(form.get("voiceId") ?? "") || null;
+    const audio = form.get("audio");
+
+    if (!text) return Response.json({ error: "Nothing to say." }, { status: 400 });
+    if (!(audio instanceof File)) return Response.json({ error: "No audio supplied." }, { status: 400 });
+    if (audio.size > MAX_AUDIO_BYTES) {
+      return Response.json({ error: "That render is too large to keep." }, { status: 413 });
+    }
+
+    // Only accept a voice the caller actually owns.
+    if (voiceId) {
+      const { rowCount } = await db().query(
+        `select 1 from "voice" where "id" = $1 and ("userId" = $2 or "userId" is null)`,
+        [voiceId, session.user.id],
+      );
+      if (!rowCount) return Response.json({ error: "That voice no longer exists." }, { status: 404 });
+    }
+
     await db().query(
-      `insert into "generation" ("id","userId","voiceId","text","source") values ($1,$2,null,$3,'preview')`,
-      [id, session.user.id, text],
+      `insert into "generation" ("id","userId","voiceId","text","audioMime","audioData","source")
+       values ($1,$2,$3,$4,$5,$6,'cloned')`,
+      [id, session.user.id, voiceId, text, audio.type || "audio/wav", Buffer.from(await audio.arrayBuffer())],
     );
-    return Response.json({ id, source: "preview", downloadable: false });
+    return Response.json({ id, source: "cloned", downloadable: true }, { status: 201 });
   }
 
-  const { rows } = await db().query(
-    `select "sampleMime","sampleAudio" from "voice"
-      where "id" = $1 and ("userId" = $2 or "userId" is null)`,
-    [voiceId, session.user.id],
-  );
-  const voice = rows[0];
-  if (!voice) return Response.json({ error: "That voice no longer exists." }, { status: 404 });
+  const { text } = (await req.json()) as { text?: string };
+  if (!text?.trim()) return Response.json({ error: "Nothing to say." }, { status: 400 });
+  if (text.length > 1000) return Response.json({ error: "Keep it under 1000 characters." }, { status: 413 });
 
-  const result = await synthesise({
-    text,
-    sample: Buffer.from(voice.sampleAudio),
-    sampleMime: voice.sampleMime ?? "audio/webm",
-  });
-
-  const audio = result.ok ? result.audio : null;
-  const mime = result.ok ? result.mime : null;
-  const notice = result.ok ? null : result.reason;
-
-  const source = audio ? "cloned" : "preview";
   await db().query(
-    `insert into "generation" ("id","userId","voiceId","text","audioMime","audioData","source")
-     values ($1,$2,$3,$4,$5,$6,$7)`,
-    [id, session.user.id, voiceId, text, mime, audio, source],
+    `insert into "generation" ("id","userId","voiceId","text","source") values ($1,$2,null,$3,'preview')`,
+    [id, session.user.id, text],
   );
-
-  return Response.json({
-    id,
-    source,
-    downloadable: Boolean(audio),
-    // Surfaced in the UI, never swallowed: the user must know when the
-    // clone did not actually run.
-    notice: audio ? null : `Cloned voice unavailable (${notice}). Using the preview voice.`,
-  });
+  return Response.json({ id, source: "preview", downloadable: false }, { status: 201 });
 }

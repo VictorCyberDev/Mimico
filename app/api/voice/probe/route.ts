@@ -8,8 +8,6 @@
  */
 export const maxDuration = 60;
 
-import { db } from "@/lib/db";
-import { synthesise } from "@/lib/voice/openvoice";
 
 const CANDIDATES = [
   "https://myshell-ai-openvoice.hf.space",
@@ -73,59 +71,6 @@ export async function GET(req: Request) {
   if (!secret || given !== secret) {
     return Response.json({ error: "forbidden" }, { status: 403 });
   }
-  const url = new URL(req.url);
-
-  // ?live=1 runs a real synthesis against a stored voice sample, which is
-  // the only way to prove the call body is right end to end.
-  if (url.searchParams.get("live") === "1") {
-    const { rows } = await db().query(
-      `select "id","name","sampleMime","sampleAudio" from "voice"
-        where "sampleAudio" is not null order by "createdAt" desc limit 1`,
-    );
-    const voice = rows[0];
-    if (!voice) return Response.json({ live: "no stored voice to test with" });
-
-    const started = Date.now();
-    const out = await synthesise({
-      text: "This is a test of the cloned voice.",
-      sample: Buffer.from(voice.sampleAudio),
-      sampleMime: voice.sampleMime ?? "audio/webm",
-    });
-    return Response.json(
-      {
-        live: {
-          voice: voice.name,
-          sampleBytes: voice.sampleAudio.length,
-          sampleMime: voice.sampleMime,
-          ms: Date.now() - started,
-          ...(out.ok ? { ok: true, audioBytes: out.audio.byteLength, mime: out.mime } : { ok: false, reason: out.reason }),
-        },
-      },
-      { headers: { "cache-control": "no-store" } },
-    );
-  }
-
-  if (url.searchParams.get("poke") === "1") {
-    const base = CANDIDATES[0];
-    const started = Date.now();
-    try {
-      const res = await fetch(`${base}/run/predict`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ fn_index: 1, data: ["hello", "default", null, true] }),
-        signal: AbortSignal.timeout(20_000),
-      });
-      const body = await res.text();
-      return Response.json({
-        poke: { base, status: res.status, ms: Date.now() - started, body: body.slice(0, 400) },
-      });
-    } catch (e) {
-      return Response.json({
-        poke: { base, ms: Date.now() - started, error: e instanceof Error ? `${e.name}: ${e.message}` : String(e) },
-      });
-    }
-  }
-
   const results = await Promise.all(CANDIDATES.map(probe));
   return Response.json({ results }, { headers: { "cache-control": "no-store" } });
 }

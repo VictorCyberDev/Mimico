@@ -1,5 +1,7 @@
 "use client";
 
+import { synthesiseInBrowser } from "./openvoiceBrowser";
+
 /**
  * One interface, two providers. OpenVoice is the real cloned voice; the
  * browser's speechSynthesis is the fallback. The fallback is never silent:
@@ -36,6 +38,7 @@ class BrowserVoice implements TtsProvider {
 
 class OpenVoice implements TtsProvider {
   private audio: HTMLAudioElement | null = null;
+  private objectUrl: string | null = null;
   private fallback = new BrowserVoice();
 
   constructor(private voiceId: string | null) {}
@@ -43,44 +46,48 @@ class OpenVoice implements TtsProvider {
   async speak(text: string, onEnd: () => void): Promise<VoiceResult> {
     if (!this.voiceId) {
       const r = await this.fallback.speak(text, onEnd);
-      return { ...r, notice: "Preview voice — record a short sample to clone your own." };
+      return { ...r, notice: "Preview voice — pick one of your voices to reply in it." };
     }
+
+    // Synthesis runs in the browser: the Space's endpoint is queued, which
+    // needs a websocket and can outlast a serverless function.
+    const out = await synthesiseInBrowser({ text, voiceId: this.voiceId });
+
+    if (!out.ok) {
+      const r = await this.fallback.speak(text, onEnd);
+      return { ...r, notice: `Cloned voice unavailable (${out.reason}) Using the preview voice.` };
+    }
+
+    this.objectUrl = URL.createObjectURL(out.blob);
+    this.audio = new Audio(this.objectUrl);
+    const finish = () => {
+      if (this.objectUrl) {
+        URL.revokeObjectURL(this.objectUrl);
+        this.objectUrl = null;
+      }
+      onEnd();
+    };
+    this.audio.onended = finish;
+    this.audio.onerror = finish;
 
     try {
-      const res = await fetch("/api/voice/clone", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text, voiceId: this.voiceId }),
-      });
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(body.error ?? `clone failed (${res.status})`);
-      }
-      const blobUrl = URL.createObjectURL(await res.blob());
-
-      this.audio = new Audio(blobUrl);
-      this.audio.onended = () => {
-        URL.revokeObjectURL(blobUrl);
-        onEnd();
-      };
-      this.audio.onended = onEnd;
-      this.audio.onerror = onEnd;
       await this.audio.play();
-      return { source: "cloned", notice: null };
     } catch {
-      // Degrade visibly, never silently.
-      const r = await this.fallback.speak(text, onEnd);
-      return {
-        ...r,
-        notice: "Cloned voice unavailable — using the preview voice for now.",
-      };
+      // Autoplay refusal is not a clone failure; report it as itself.
+      finish();
+      return { source: "cloned", notice: "Tap the mic again to hear the reply." };
     }
+    return { source: "cloned", notice: null };
   }
 
   cancel() {
     if (this.audio) {
       this.audio.pause();
       this.audio = null;
+    }
+    if (this.objectUrl) {
+      URL.revokeObjectURL(this.objectUrl);
+      this.objectUrl = null;
     }
     this.fallback.cancel();
   }

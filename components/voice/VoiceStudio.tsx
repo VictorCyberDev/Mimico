@@ -4,6 +4,7 @@ import { useCallback, useState } from "react";
 import { VoiceRecorder } from "./VoiceRecorder";
 import { FormError } from "@/components/auth/FormError";
 import { CloseIcon, InfoIcon } from "@/components/ui/icons";
+import { synthesiseInBrowser } from "@/lib/voice/openvoiceBrowser";
 
 export type VoiceRow = {
   id: string;
@@ -40,6 +41,7 @@ export function VoiceStudio({
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [last, setLast] = useState<{ id: string; text: string; downloadable: boolean } | null>(null);
+  const [stage, setStage] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -67,35 +69,53 @@ export function VoiceStudio({
     setBusy(true);
     setNotice(null);
     setError(null);
+    setStage(null);
 
     try {
+      if (voiceId) {
+        // Cloned voice: render in the browser, then keep the file.
+        const out = await synthesiseInBrowser({ text: line, voiceId, onProgress: setStage });
+        if (out.ok) {
+          const form = new FormData();
+          form.set("text", line);
+          form.set("voiceId", voiceId);
+          form.set("audio", out.blob, "render.wav");
+          const saved = await fetch("/api/generations", { method: "POST", body: form });
+          const body = await saved.json();
+          if (!saved.ok) throw new Error(body.error ?? "Rendered, but couldn't save it.");
+
+          const url = URL.createObjectURL(out.blob);
+          const audio = new Audio(url);
+          audio.onended = () => URL.revokeObjectURL(url);
+          void audio.play().catch(() => {});
+
+          setLast({ id: body.id, text: line, downloadable: true });
+          setText("");
+          void refresh();
+          return;
+        }
+        // Fell back: say so plainly rather than passing the browser voice off.
+        setNotice(`Cloned voice unavailable (${out.reason}) Using the preview voice, so there's no file to save.`);
+      }
+
       const res = await fetch("/api/generations", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text: line, voiceId: voiceId || null }),
+        body: JSON.stringify({ text: line }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? "That didn't render.");
 
-      if (body.downloadable) {
-        // Real cloned audio came back: play it from the server.
-        const audio = new Audio(`/api/generations/${body.id}/audio`);
-        void audio.play().catch(() => {});
-      } else {
-        // No clone available, so speak it with the browser voice and say so.
-        if ("speechSynthesis" in window) window.speechSynthesis.speak(new SpeechSynthesisUtterance(line));
-        setNotice(
-          body.notice ??
-            "Spoken in the preview voice — no cloned voice was used, so there's no file to save.",
-        );
-      }
-      setLast({ id: body.id, text: line, downloadable: Boolean(body.downloadable) });
+      if ("speechSynthesis" in window) window.speechSynthesis.speak(new SpeechSynthesisUtterance(line));
+      if (!voiceId) setNotice("Spoken in the preview voice, so there's no file to save.");
+      setLast({ id: body.id, text: line, downloadable: false });
       setText("");
       void refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "That didn't render.");
     } finally {
       setBusy(false);
+      setStage(null);
     }
   }
 
@@ -138,7 +158,7 @@ export function VoiceStudio({
             disabled={busy || !text.trim()}
             style={busy || !text.trim() ? { opacity: 0.55 } : undefined}
           >
-            {busy ? "Rendering…" : "Speak it"}
+            {busy ? (stage ?? "Rendering…") : "Speak it"}
           </button>
         </div>
         {last && (
