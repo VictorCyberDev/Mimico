@@ -1,21 +1,37 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
-import { getKokoro, listVoices, speakKokoro, type KokoroVoice, type LoadProgress } from "@/lib/voice/kokoro";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  cachedPreview,
+  currentBackend,
+  getKokoro,
+  listVoices,
+  previewVoice,
+  type KokoroVoice,
+  type LoadProgress,
+} from "@/lib/voice/kokoro";
 import { useAssistant } from "@/lib/store/assistantStore";
 import { InfoIcon } from "@/components/ui/icons";
 
-const SAMPLE_LINE =
-  "Hey, all done. Your clip is ready whenever you are, so take your time and let me know.";
+/**
+ * Short on purpose. Generation time scales with output length, so a long
+ * sample line is the difference between a preview that lands in a second
+ * and one the user gives up waiting for.
+ */
+const SAMPLE_LINE = "Hey, all done.";
 
-/** Kokoro selections are namespaced so the system voices can coexist. */
+/** How many voices to render quietly up front so browsing feels instant. */
+const PREFETCH_COUNT = 8;
+
 export const KOKORO_PREFIX = "kokoro::";
 
 export function VoiceCatalogue() {
   const [voices, setVoices] = useState<KokoroVoice[]>([]);
   const [progress, setProgress] = useState<LoadProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [playing, setPlaying] = useState<string | null>(null);
+  const [rendering, setRendering] = useState<string | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  const [warmed, setWarmed] = useState<Set<string>>(new Set());
   const [accent, setAccent] = useState("all");
   const [gender, setGender] = useState("all");
   const [query, setQuery] = useState("");
@@ -23,21 +39,92 @@ export function VoiceCatalogue() {
   const selected = useAssistant((s) => s.previewVoiceId);
   const setSelected = useAssistant((s) => s.setPreviewVoiceId);
 
+  // Only the newest request may update the UI, so clicking through voices
+  // never leaves a stale render in charge.
+  const requestId = useRef(0);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // The counter is reset where the render starts, not here: setting state
+  // synchronously inside an effect triggers a cascading render.
+  useEffect(() => {
+    if (!rendering) return;
+    const t = setInterval(() => setElapsed((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [rendering]);
+
+  useEffect(
+    () => () => {
+      audioRef.current?.pause();
+      audioRef.current = null;
+    },
+    [],
+  );
+
+  const play = useCallback((blob: Blob) => {
+    audioRef.current?.pause();
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    audioRef.current = audio;
+    audio.onended = () => URL.revokeObjectURL(url);
+    void audio.play().catch(() => URL.revokeObjectURL(url));
+  }, []);
+
   const load = useCallback(async () => {
     setError(null);
     try {
       const tts = await getKokoro(setProgress);
-      setVoices(listVoices(tts));
-      setProgress({ stage: "Ready", pct: 100 });
+      const list = listVoices(tts);
+      setVoices(list);
+      setProgress(null);
+
+      // Quietly render the first handful so the common case is a cache hit.
+      void (async () => {
+        for (const v of list.slice(0, PREFETCH_COUNT)) {
+          try {
+            await previewVoice(v.id, SAMPLE_LINE);
+            setWarmed((prev) => new Set(prev).add(v.id));
+          } catch {
+            break;
+          }
+        }
+      })();
     } catch (err) {
       setError(
-        err instanceof Error
-          ? `Couldn't load the voice model: ${err.message}`
-          : "Couldn't load the voice model.",
+        err instanceof Error ? `Couldn't load the voices: ${err.message}` : "Couldn't load the voices.",
       );
       setProgress(null);
     }
   }, []);
+
+  const hear = useCallback(
+    async (v: KokoroVoice) => {
+      const id = ++requestId.current;
+
+      const hit = cachedPreview(v.id);
+      if (hit) {
+        play(hit);
+        return;
+      }
+
+      setElapsed(0);
+      setRendering(v.id);
+      setError(null);
+      try {
+        const blob = await previewVoice(v.id, SAMPLE_LINE);
+        setWarmed((prev) => new Set(prev).add(v.id));
+        // A newer click happened while this rendered; cache it, don't play it.
+        if (id !== requestId.current) return;
+        play(blob);
+      } catch (err) {
+        if (id === requestId.current) {
+          setError(err instanceof Error ? err.message : "That voice didn't render.");
+        }
+      } finally {
+        if (id === requestId.current) setRendering(null);
+      }
+    },
+    [play],
+  );
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -49,29 +136,8 @@ export function VoiceCatalogue() {
     );
   }, [voices, accent, gender, query]);
 
-  async function preview(v: KokoroVoice) {
-    setPlaying(v.id);
-    setError(null);
-    try {
-      const blob = await speakKokoro(SAMPLE_LINE, v.id, 1, setProgress);
-      const url = URL.createObjectURL(blob);
-      const audio = new Audio(url);
-      audio.onended = () => {
-        URL.revokeObjectURL(url);
-        setPlaying(null);
-      };
-      audio.onerror = () => {
-        URL.revokeObjectURL(url);
-        setPlaying(null);
-      };
-      await audio.play();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "That voice didn't render.");
-      setPlaying(null);
-    }
-  }
-
   const loaded = voices.length > 0;
+  const slow = loaded && currentBackend() === "wasm";
 
   return (
     <div className="panel" style={{ padding: "26px 28px" }}>
@@ -81,14 +147,13 @@ export function VoiceCatalogue() {
         </div>
         {loaded && (
           <span className="mono-label" style={{ color: "var(--text-tertiary)" }}>
-            {filtered.length} of {voices.length}
+            {filtered.length} of {voices.length} · {warmed.size} ready
           </span>
         )}
       </div>
 
       <p style={{ color: "var(--text-secondary)", lineHeight: "var(--lh-normal)", margin: "12px 0 18px" }}>
-        Neural voices that run entirely on your device. Distinct speakers, not one voice
-        pitch-shifted.
+        Neural voices that run entirely on your device. Distinct speakers, not one voice pitch-shifted.
       </p>
 
       {!loaded ? (
@@ -96,8 +161,7 @@ export function VoiceCatalogue() {
           <div className="preview-voice-note mb-4" style={{ color: "var(--text-tertiary)" }}>
             <InfoIcon />
             <span>
-              First use downloads the voice model once, about 86MB, then it&rsquo;s cached and works
-              offline.
+              First use downloads the voice model once, about 86MB, then it&rsquo;s cached and works offline.
             </span>
           </div>
           <button
@@ -111,24 +175,29 @@ export function VoiceCatalogue() {
               ? `${progress.stage}${progress.pct !== null ? ` ${progress.pct}%` : "…"}`
               : "Load the voices"}
           </button>
-          {progress?.pct !== null && progress?.pct !== undefined && (
+          {progress?.pct != null && (
             <div
               className="mt-4"
               style={{ height: 6, borderRadius: 999, background: "var(--surface-sunken)", overflow: "hidden" }}
             >
               <div
-                style={{
-                  height: "100%",
-                  width: `${progress.pct}%`,
-                  background: "var(--accent)",
-                  transition: "width 200ms linear",
-                }}
+                style={{ height: "100%", width: `${progress.pct}%`, background: "var(--accent)", transition: "width 200ms linear" }}
               />
             </div>
           )}
         </>
       ) : (
         <>
+          {slow && (
+            <div className="preview-voice-note mb-4" style={{ color: "var(--caution)" }}>
+              <InfoIcon />
+              <span>
+                This browser has no WebGPU, so voices render on the CPU and the first play of each
+                takes a few seconds. Once heard, it&rsquo;s instant.
+              </span>
+            </div>
+          )}
+
           <div className="mb-4 flex flex-wrap gap-2">
             <input
               className="field flex-1"
@@ -154,6 +223,8 @@ export function VoiceCatalogue() {
             {filtered.map((v, i) => {
               const id = `${KOKORO_PREFIX}${v.id}`;
               const isSelected = selected === id;
+              const isReady = warmed.has(v.id);
+              const isRendering = rendering === v.id;
               return (
                 <div
                   key={v.id}
@@ -161,21 +232,25 @@ export function VoiceCatalogue() {
                   style={i ? { borderTop: "1px solid var(--border)" } : undefined}
                 >
                   <div className="min-w-0">
-                    <div style={{ fontWeight: 550 }}>{v.name}</div>
+                    <div className="flex items-center gap-2">
+                      <span style={{ fontWeight: 550 }}>{v.name}</span>
+                      {isReady && <span className="status-dot" style={{ background: "var(--accent)" }} />}
+                    </div>
                     <div className="mono-label" style={{ color: "var(--text-tertiary)", marginTop: 2 }}>
                       {v.accent} · {v.gender}
                       {v.grade ? ` · ${v.grade}` : ""}
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
+                    {/* Never disabled: switching voices mid-render is the
+                        whole point of browsing them. */}
                     <button
                       type="button"
                       className="btn btn-ghost"
-                      style={{ fontSize: "var(--fs-small)" }}
-                      onClick={() => void preview(v)}
-                      disabled={playing !== null}
+                      style={{ fontSize: "var(--fs-small)", minWidth: 96 }}
+                      onClick={() => void hear(v)}
                     >
-                      {playing === v.id ? "Playing…" : "Hear it"}
+                      {isRendering ? `${elapsed}s…` : isReady ? "Play" : "Hear it"}
                     </button>
                     <button
                       type="button"

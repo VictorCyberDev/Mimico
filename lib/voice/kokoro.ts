@@ -43,6 +43,27 @@ export function describeVoice(id: string, meta: { name?: string; gender?: string
 
 let instance: KokoroTTS | null = null;
 let loading: Promise<KokoroTTS> | null = null;
+let backend: "webgpu" | "wasm" = "wasm";
+
+/** Which backend the model ended up on; WASM is markedly slower. */
+export function currentBackend(): "webgpu" | "wasm" {
+  return backend;
+}
+
+/**
+ * navigator.gpu existing does not mean WebGPU works; the adapter request
+ * is what actually decides, and picking webgpu without it fails at load.
+ */
+async function pickDevice(): Promise<"webgpu" | "wasm"> {
+  try {
+    const gpu = (navigator as Navigator & { gpu?: { requestAdapter(): Promise<unknown> } }).gpu;
+    if (!gpu) return "wasm";
+    const adapter = await gpu.requestAdapter();
+    return adapter ? "webgpu" : "wasm";
+  } catch {
+    return "wasm";
+  }
+}
 
 export type LoadProgress = { stage: string; pct: number | null };
 
@@ -55,9 +76,8 @@ export async function getKokoro(onProgress?: (p: LoadProgress) => void): Promise
     onProgress?.({ stage: "Loading the voice model", pct: null });
     const { KokoroTTS: Ctor } = await import("kokoro-js");
 
-    // WebGPU is much faster where present; WASM is the portable fallback.
-    const device: "webgpu" | "wasm" =
-      typeof navigator !== "undefined" && "gpu" in navigator ? "webgpu" : "wasm";
+    const device = await pickDevice();
+    backend = device;
 
     const tts = await Ctor.from_pretrained(MODEL_ID, {
       dtype: "q8",
@@ -72,6 +92,16 @@ export async function getKokoro(onProgress?: (p: LoadProgress) => void): Promise
     });
 
     instance = tts;
+
+    // First generation pays graph/kernel init. Do it here, on a syllable,
+    // so the user's first real preview is not the one that waits.
+    onProgress?.({ stage: "Warming up", pct: null });
+    try {
+      await tts.generate("Hi.", { voice: "af_heart" as never });
+    } catch {
+      // A failed warm-up is not fatal; the real call will surface it.
+    }
+
     return tts;
   })();
 
@@ -90,6 +120,16 @@ export function listVoices(tts: KokoroTTS): KokoroVoice[] {
     .sort((a, b) => a.grade.localeCompare(b.grade) || a.name.localeCompare(b.name));
 }
 
+/**
+ * Rendered previews keyed by voice, so hearing a voice a second time is
+ * instant and flicking between them costs nothing after the first pass.
+ */
+const previewCache = new Map<string, Blob>();
+
+export function cachedPreview(voiceId: string): Blob | undefined {
+  return previewCache.get(voiceId);
+}
+
 /** Renders a line and returns playable audio. */
 export async function speakKokoro(
   text: string,
@@ -102,6 +142,15 @@ export async function speakKokoro(
   // kokoro-js types the voice id as a union of its own keys.
   const audio = await tts.generate(text, { voice: voiceId as never, speed });
   return audio.toBlob();
+}
+
+/** Preview render with caching; the sample line is deliberately short. */
+export async function previewVoice(voiceId: string, line: string): Promise<Blob> {
+  const hit = previewCache.get(voiceId);
+  if (hit) return hit;
+  const blob = await speakKokoro(line, voiceId);
+  previewCache.set(voiceId, blob);
+  return blob;
 }
 
 export function isKokoroLoaded(): boolean {
