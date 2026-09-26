@@ -5,13 +5,15 @@ import { useCallback, useRef } from "react";
 /**
  * AssemblyAI Universal-Streaming (v3) straight from the browser.
  *
- * The route at /api/voice/token mints a short-lived token; the socket is
- * opened here so no long-lived connection is held in a Vercel function.
- * Audio is captured at 16 kHz, converted to PCM16 and sent as binary frames.
+ * /api/voice/token mints a short-lived token; the socket opens here so no
+ * long-lived connection is held in a Vercel function.
+ *
+ * `encoding=pcm_s16le` is required. Without it the server does not read the
+ * binary frames we send as PCM16 and simply never emits a Turn, which looks
+ * from the UI exactly like "nothing happened".
  */
 const SAMPLE_RATE = 16_000;
 
-// Runs on the audio thread: hands raw Float32 frames back to the main thread.
 const WORKLET_SOURCE = `
 class PcmTap extends AudioWorkletProcessor {
   process(inputs) {
@@ -36,6 +38,8 @@ export type StreamingHandlers = {
   onPartial: (text: string) => void;
   onFinal: (text: string) => void;
   onError: (message: string) => void;
+  /** Fires once the socket is open and audio is actually flowing. */
+  onOpen?: () => void;
 };
 
 export function useAssemblyStreaming() {
@@ -68,7 +72,7 @@ export function useAssemblyStreaming() {
   }, []);
 
   const start = useCallback(
-    async ({ onPartial, onFinal, onError }: StreamingHandlers) => {
+    async ({ onPartial, onFinal, onError, onOpen }: StreamingHandlers) => {
       try {
         const tokenRes = await fetch("/api/voice/token");
         if (!tokenRes.ok) {
@@ -83,16 +87,25 @@ export function useAssemblyStreaming() {
 
         const audio = new AudioContext({ sampleRate: SAMPLE_RATE });
         ctx.current = audio;
+        // Some browsers hand back a suspended context until it is resumed
+        // inside a gesture; without this the worklet never pulls any audio.
+        if (audio.state === "suspended") await audio.resume();
 
         const blob = new Blob([WORKLET_SOURCE], { type: "application/javascript" });
         workletUrl.current = URL.createObjectURL(blob);
         await audio.audioWorklet.addModule(workletUrl.current);
 
-        const socket = new WebSocket(
-          `wss://streaming.assemblyai.com/v3/ws?sample_rate=${SAMPLE_RATE}&format_turns=true&token=${encodeURIComponent(token)}`,
-        );
+        const params = new URLSearchParams({
+          encoding: "pcm_s16le",
+          sample_rate: String(SAMPLE_RATE),
+          format_turns: "true",
+          token,
+        });
+        const socket = new WebSocket(`wss://streaming.assemblyai.com/v3/ws?${params}`);
         socket.binaryType = "arraybuffer";
         ws.current = socket;
+
+        let sawAnyTurn = false;
 
         socket.onmessage = (event) => {
           let msg: Record<string, unknown>;
@@ -101,31 +114,62 @@ export function useAssemblyStreaming() {
           } catch {
             return;
           }
+          if (msg.type === "Error") {
+            onError(String(msg.error ?? "Transcription refused the stream."));
+            return;
+          }
           if (msg.type !== "Turn") return;
           const transcript = String(msg.transcript ?? "");
           if (!transcript) return;
+          sawAnyTurn = true;
           if (msg.end_of_turn) onFinal(transcript);
           else onPartial(transcript);
         };
 
-        socket.onerror = () => onError("The transcription connection dropped.");
-
         await new Promise<void>((resolve, reject) => {
-          socket.onopen = () => resolve();
+          const openTimer = setTimeout(
+            () => reject(new Error("Timed out opening the transcription socket.")),
+            10_000,
+          );
+          socket.onopen = () => {
+            clearTimeout(openTimer);
+            resolve();
+          };
+          socket.onerror = () => {
+            clearTimeout(openTimer);
+            reject(new Error("The transcription connection could not be opened."));
+          };
           socket.addEventListener("close", (e) => {
-            if (e.code !== 1000 && e.code !== 1005) reject(new Error(`Socket closed (${e.code}).`));
+            clearTimeout(openTimer);
+            // 1000/1005 are normal closes after a session ends.
+            if (e.code !== 1000 && e.code !== 1005) {
+              const why = e.reason ? `: ${e.reason}` : "";
+              (sawAnyTurn ? onError : reject)(
+                new Error(`Transcription closed unexpectedly (${e.code})${why}`) as never,
+              );
+            }
           });
-          setTimeout(() => reject(new Error("Timed out opening the transcription socket.")), 10_000);
         });
+
+        // Past the handshake, socket errors are reported rather than thrown.
+        socket.onerror = () => onError("The transcription connection dropped.");
 
         const source = audio.createMediaStreamSource(stream.current);
         const tap = new AudioWorkletNode(audio, "pcm-tap");
         tap.port.onmessage = (e: MessageEvent<Float32Array>) => {
           if (socket.readyState === WebSocket.OPEN) socket.send(floatToPcm16(e.data));
         };
+
+        // The worklet only gets pulled while it reaches the destination, but
+        // routing the mic straight there would play the user back to
+        // themselves. A muted gain node keeps the graph alive and silent.
+        const mute = audio.createGain();
+        mute.gain.value = 0;
         source.connect(tap);
-        // Keep the graph pulling without routing mic audio back to the speakers.
-        tap.connect(audio.destination);
+        tap.connect(mute);
+        mute.connect(audio.destination);
+
+        onOpen?.();
       } catch (err) {
         stop();
         onError(err instanceof Error ? err.message : "Could not start listening.");

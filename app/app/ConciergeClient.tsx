@@ -12,8 +12,11 @@ import { HistoryDrawer } from "@/components/voice/HistoryDrawer";
 import { ConnectionBanner } from "@/components/voice/ConnectionBanner";
 import { PermissionGate } from "@/components/voice/PermissionGate";
 import { TextComposer } from "@/components/voice/TextComposer";
-import { HistoryIcon, InfoIcon, KeyboardIcon, PowerIcon, ToneIcon } from "@/components/ui/icons";
+import { VoiceStudio, type GenerationRow, type VoiceRow } from "@/components/voice/VoiceStudio";
+import { HistoryIcon, InfoIcon, KeyboardIcon, PowerIcon } from "@/components/ui/icons";
 import { authClient } from "@/lib/auth/auth-client";
+
+type Tab = "talk" | "studio";
 
 const STATUS_WORD = {
   idle: "Tap to talk",
@@ -22,7 +25,37 @@ const STATUS_WORD = {
   speaking: "Speaking — tap to interrupt",
 } as const;
 
-export function ConciergeClient() {
+/** Shared chrome so Talk and Voices read as one app, not two screens. */
+function TabBar({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void }) {
+  return (
+    <div className="chip-row" role="tablist" aria-label="Concierge sections">
+      <div
+        className="chip-thumb"
+        style={{ width: "50%", transform: `translateX(${tab === "talk" ? 0 : 100}%)` }}
+      />
+      {(["talk", "studio"] as const).map((t) => (
+        <button
+          key={t}
+          type="button"
+          role="tab"
+          aria-selected={tab === t}
+          className={`chip${tab === t ? " is-selected" : ""}`}
+          onClick={() => onChange(t)}
+        >
+          {t === "talk" ? "Talk" : "Voices"}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function ConciergeClient({
+  initialVoices,
+  initialGenerations,
+}: {
+  initialVoices: VoiceRow[];
+  initialGenerations: GenerationRow[];
+}) {
   useTheme();
   const router = useRouter();
   const status = useAssistant((s) => s.status);
@@ -39,6 +72,7 @@ export function ConciergeClient() {
   const { speakingText, tapMic, sendText } = useConcierge();
   const [endOpen, setEndOpen] = useState(false);
   const [started, setStarted] = useState(false);
+  const [tab, setTab] = useState<Tab>("talk");
 
   // Mic permission is asked for inside the app, once there is an account (§2).
   if (micPermission !== "granted" && !textMode) {
@@ -50,6 +84,23 @@ export function ConciergeClient() {
   }
 
   const busy = status === "thinking" || status === "speaking";
+
+  if (tab === "studio") {
+    return (
+      <div className="relative flex min-h-[100dvh] flex-col">
+        <div className="core-header glass">
+          <div style={{ fontWeight: 650 }}>
+            Mimico <span style={{ color: "var(--accent)" }}>Concierge</span>
+          </div>
+          <TabBar tab={tab} onChange={setTab} />
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          <VoiceStudio initialVoices={initialVoices} initialGenerations={initialGenerations} />
+        </div>
+        <ConnectionBanner />
+      </div>
+    );
+  }
 
   // ---- text mode ----------------------------------------------------------
   if (textMode) {
@@ -86,10 +137,8 @@ export function ConciergeClient() {
           <div style={{ fontWeight: 650 }}>
             Mimico <span style={{ color: "var(--accent)" }}>Concierge</span>
           </div>
-          <div className="flex gap-2">
-            <button type="button" className="icon-btn" aria-label="Tone settings" onClick={() => setStarted(true)}>
-              <ToneIcon />
-            </button>
+          <div className="flex items-center gap-2">
+            <TabBar tab={tab} onChange={setTab} />
             <button type="button" className="icon-btn" aria-label="Type instead" onClick={() => setTextMode(true)}>
               <KeyboardIcon />
             </button>
@@ -118,6 +167,12 @@ export function ConciergeClient() {
               Mic off &mdash; nothing is heard until you start
             </span>
           </div>
+          {voiceNotice && (
+            <div className="preview-voice-note fade-pop" style={{ color: "var(--caution)", maxWidth: 420, textAlign: "center" }}>
+              <InfoIcon />
+              <span>{voiceNotice}</span>
+            </div>
+          )}
         </div>
         <ConnectionBanner />
       </div>
@@ -132,6 +187,7 @@ export function ConciergeClient() {
           Mimico <span style={{ color: "var(--accent)" }}>Concierge</span>
         </div>
         <div className="flex items-center gap-2.5">
+          <TabBar tab={tab} onChange={setTab} />
           <div className="core-badge">
             <span className={`status-dot${status === "listening" ? " is-live" : ""}`} />
             <span className="mono-label" style={{ color: "var(--text-tertiary)" }}>
