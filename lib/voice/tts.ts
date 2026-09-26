@@ -15,6 +15,24 @@ export interface TtsProvider {
   cancel(): void;
 }
 
+/**
+ * Waits for the voice list. getVoices() is populated asynchronously, and
+ * speak() called before it fills silently does nothing in Chrome, which
+ * looks exactly like the assistant replying in text only.
+ */
+async function voicesReady(): Promise<SpeechSynthesisVoice[]> {
+  const synth = window.speechSynthesis;
+  const have = synth.getVoices();
+  if (have.length) return have;
+
+  return new Promise((resolve) => {
+    const done = () => resolve(synth.getVoices());
+    synth.addEventListener("voiceschanged", done, { once: true });
+    // Some browsers never fire the event; do not hang on it.
+    setTimeout(done, 1000);
+  });
+}
+
 /** §8 — the honest preview voice the design copy already promises. */
 class BrowserVoice implements TtsProvider {
   async speak(text: string, onEnd: () => void): Promise<VoiceResult> {
@@ -22,10 +40,41 @@ class BrowserVoice implements TtsProvider {
       onEnd();
       return { source: "preview", notice: "This browser can't speak replies out loud." };
     }
+
+    const synth = window.speechSynthesis;
+    const voices = await voicesReady();
+
+    // A queued utterance from an earlier turn blocks this one.
+    synth.cancel();
+
     const utter = new SpeechSynthesisUtterance(text);
-    utter.onend = onEnd;
-    utter.onerror = onEnd;
-    window.speechSynthesis.speak(utter);
+    const preferred =
+      voices.find((v) => v.lang?.startsWith("en") && v.localService) ??
+      voices.find((v) => v.lang?.startsWith("en")) ??
+      voices[0];
+    if (preferred) utter.voice = preferred;
+
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearInterval(keepAlive);
+      onEnd();
+    };
+    utter.onend = finish;
+    utter.onerror = finish;
+
+    // Chrome stops speaking after ~15s unless the queue is nudged.
+    const keepAlive = setInterval(() => {
+      if (!synth.speaking) {
+        finish();
+        return;
+      }
+      synth.pause();
+      synth.resume();
+    }, 10_000);
+
+    synth.speak(utter);
     return { source: "preview", notice: null };
   }
 
@@ -51,11 +100,20 @@ class OpenVoice implements TtsProvider {
 
     // Synthesis runs in the browser: the Space's endpoint is queued, which
     // needs a websocket and can outlast a serverless function.
-    const out = await synthesiseInBrowser({ text, voiceId: this.voiceId, style: "en_default" });
+    //
+    // Conversation cannot wait minutes for a reply, so the clone gets a
+    // short window and the preview voice takes over if it misses it. The
+    // studio keeps the long timeout, where waiting is a reasonable trade.
+    const out = await synthesiseInBrowser({
+      text,
+      voiceId: this.voiceId,
+      style: "en_default",
+      timeoutMs: 25_000,
+    });
 
     if (!out.ok) {
       const r = await this.fallback.speak(text, onEnd);
-      return { ...r, notice: `Cloned voice unavailable (${out.reason}) Using the preview voice.` };
+      return { ...r, notice: `Cloned voice unavailable (${out.reason}) Answering in the preview voice.` };
     }
 
     this.objectUrl = URL.createObjectURL(out.blob);
