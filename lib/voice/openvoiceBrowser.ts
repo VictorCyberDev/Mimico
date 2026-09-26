@@ -1,5 +1,7 @@
 "use client";
 
+import { blobToWav } from "./wav";
+
 /**
  * OpenVoice from the browser, over the Gradio 3 queue.
  *
@@ -76,10 +78,24 @@ export async function synthesiseInBrowser({
 
   const held: { ws: WebSocket | null } = { ws: null };
   try {
-    onProgress?.("Fetching your voice sample…");
+    onProgress?.("Preparing your voice sample…");
     const sampleRes = await fetch(`/api/voices/${voiceId}`);
     if (!sampleRes.ok) return { ok: false, reason: "Could not load that voice sample." };
-    const dataUri = await blobToDataUri(await sampleRes.blob());
+
+    // Recorded audio is webm/opus, which the Space cannot decode: Gradio
+    // loads it server-side with soundfile/librosa and neither handles that
+    // codec. The browser can decode what it recorded, so convert to PCM WAV
+    // here and send the Space only a format it can open.
+    let wav: Blob;
+    try {
+      wav = await blobToWav(await sampleRes.blob());
+    } catch {
+      return {
+        ok: false,
+        reason: "That voice sample could not be decoded. Try recording it again.",
+      };
+    }
+    const dataUri = await blobToDataUri(wav);
 
     const hash = sessionHash();
     const wsUrl = `${SPACE.replace(/^http/, "ws")}/queue/join`;
@@ -132,7 +148,7 @@ export async function synthesiseInBrowser({
                 data: [
                   text,
                   style,
-                  { name: "reference.webm", data: dataUri, is_file: false },
+                  { name: "reference.wav", data: dataUri, is_file: false },
                   // The Space's own terms checkbox; it refuses to run without it.
                   true,
                 ],
@@ -147,7 +163,19 @@ export async function synthesiseInBrowser({
           case "process_completed": {
             const out = msg.output as { data?: unknown[]; error?: string } | undefined;
             if (msg.success === false || out?.error) {
-              done(() => reject(new Error(out?.error ?? "The voice model refused that request.")));
+              // The Space sometimes fails with success:false and no error
+              // string. Reporting a generic line there hides the only
+              // evidence there is, so pass the payload through.
+              const detail =
+                out?.error ??
+                (() => {
+                  try {
+                    return JSON.stringify(msg).slice(0, 300);
+                  } catch {
+                    return "no detail";
+                  }
+                })();
+              done(() => reject(new Error(`Voice model refused: ${detail}`)));
               return;
             }
             const data = out?.data ?? [];
