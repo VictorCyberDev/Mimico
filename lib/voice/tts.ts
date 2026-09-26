@@ -1,7 +1,8 @@
 "use client";
 
 import { synthesiseInBrowser } from "./openvoiceBrowser";
-import { TONE_PRESETS } from "./presets";
+import { speakKokoro } from "./kokoro";
+import { KOKORO_PREFIX } from "@/components/voice/VoiceCatalogue";
 import { useAssistant } from "@/lib/store/assistantStore";
 
 /**
@@ -43,6 +44,28 @@ class BrowserVoice implements TtsProvider {
       return { source: "preview", notice: "This browser can't speak replies out loud." };
     }
 
+    // A Kokoro voice was chosen: render it locally. Distinct neural
+    // speakers, where speechSynthesis only offers rate and pitch on
+    // whatever the OS happens to ship.
+    const picked = useAssistant.getState().previewVoiceId;
+    if (picked?.startsWith(KOKORO_PREFIX)) {
+      try {
+        const blob = await speakKokoro(text, picked.slice(KOKORO_PREFIX.length));
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        const finish = () => {
+          URL.revokeObjectURL(url);
+          onEnd();
+        };
+        audio.onended = finish;
+        audio.onerror = finish;
+        await audio.play();
+        return { source: "preview", notice: null };
+      } catch {
+        // Fall through to the system voice rather than going silent.
+      }
+    }
+
     const synth = window.speechSynthesis;
     const voices = await voicesReady();
 
@@ -51,26 +74,13 @@ class BrowserVoice implements TtsProvider {
 
     const utter = new SpeechSynthesisUtterance(text);
 
-    // Honour a voice picked from the catalogue; otherwise fall back to a
-    // sensible English default so replies always have a voice.
-    const chosen = useAssistant.getState().previewVoiceId;
-    const [chosenUri, chosenTone] = chosen?.split("::") ?? [];
-    const fromCatalogue = chosenUri ? voices.find((v) => v.voiceURI === chosenUri) : undefined;
-
-    if (fromCatalogue) {
-      utter.voice = fromCatalogue;
-      const tone = TONE_PRESETS.find((t) => t.id === chosenTone);
-      if (tone) {
-        utter.rate = tone.rate;
-        utter.pitch = tone.pitch;
-      }
-    } else {
-      const preferred =
-        voices.find((v) => v.lang?.startsWith("en") && v.localService) ??
-        voices.find((v) => v.lang?.startsWith("en")) ??
-        voices[0];
-      if (preferred) utter.voice = preferred;
-    }
+    // No neural voice chosen or it failed to render: the OS voice is the
+    // floor, so replies are never silent.
+    const preferred =
+      voices.find((v) => v.lang?.startsWith("en") && v.localService) ??
+      voices.find((v) => v.lang?.startsWith("en")) ??
+      voices[0];
+    if (preferred) utter.voice = preferred;
 
     let settled = false;
     const finish = () => {
