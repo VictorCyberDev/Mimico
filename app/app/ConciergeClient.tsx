@@ -69,10 +69,11 @@ export function ConciergeClient({
   const voiceNotice = useAssistant((s) => s.voiceNotice);
   const setMicPermission = useAssistant((s) => s.setMicPermission);
 
-  const { speakingText, tapMic, sendText } = useConcierge();
+  const { speakingText, tapMic, sendText, setActiveVoice } = useConcierge();
   const [endOpen, setEndOpen] = useState(false);
   const [started, setStarted] = useState(false);
   const [tab, setTab] = useState<Tab>("talk");
+  const [replyVoice, setReplyVoice] = useState<string>("");
 
   // Mic permission is asked for inside the app, once there is an account (§2).
   if (micPermission !== "granted" && !textMode) {
@@ -260,6 +261,33 @@ export function ConciergeClient({
               <InfoIcon />
               <span>{voiceNotice}</span>
             </div>
+          )}
+
+          {/* Which voice Concierge answers in. Empty means the preview voice. */}
+          {initialVoices.some((v) => v.kind === "cloned") && (
+            <label className="flex items-center gap-2">
+              <span className="mono-label" style={{ color: "var(--text-tertiary)" }}>
+                Reply in
+              </span>
+              <select
+                className="field"
+                style={{ padding: "8px 12px", fontSize: "var(--fs-small)" }}
+                value={replyVoice}
+                onChange={(e) => {
+                  setReplyVoice(e.target.value);
+                  setActiveVoice(e.target.value || null);
+                }}
+              >
+                <option value="">Preview voice</option>
+                {initialVoices
+                  .filter((v) => v.kind === "cloned")
+                  .map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.name}
+                    </option>
+                  ))}
+              </select>
+            </label>
           )}
 
           <button type="button" className="btn btn-ghost" style={{ fontSize: "var(--fs-small)" }} onClick={() => setTextMode(true)}>

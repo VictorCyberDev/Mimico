@@ -48,8 +48,13 @@ async function probe(base: string) {
             out.returns = pick?.returns?.map((x) => `${x.label}:${x.type}`);
           } else {
             out.gradioVersion = json.version;
-            const deps = (json.dependencies ?? []) as { api_name?: string | null }[];
+            // Gradio 3 with the queue on refuses direct /run/predict and
+            // requires the websocket queue instead. That distinction decides
+            // whether the timeout is the wrong transport or just a slow CPU.
+            out.enableQueue = json.enable_queue;
+            const deps = (json.dependencies ?? []) as { api_name?: string | null; queue?: boolean | null }[];
             out.apiNames = deps.map((d) => d.api_name ?? null);
+            out.depQueue = deps.map((d) => d.queue ?? null);
           }
         } catch {
           out[`${path}_snippet`] = body.slice(0, 200);
@@ -98,6 +103,27 @@ export async function GET(req: Request) {
       },
       { headers: { "cache-control": "no-store" } },
     );
+  }
+
+  if (url.searchParams.get("poke") === "1") {
+    const base = CANDIDATES[0];
+    const started = Date.now();
+    try {
+      const res = await fetch(`${base}/run/predict`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ fn_index: 1, data: ["hello", "default", null, true] }),
+        signal: AbortSignal.timeout(20_000),
+      });
+      const body = await res.text();
+      return Response.json({
+        poke: { base, status: res.status, ms: Date.now() - started, body: body.slice(0, 400) },
+      });
+    } catch (e) {
+      return Response.json({
+        poke: { base, ms: Date.now() - started, error: e instanceof Error ? `${e.name}: ${e.message}` : String(e) },
+      });
+    }
   }
 
   const results = await Promise.all(CANDIDATES.map(probe));
