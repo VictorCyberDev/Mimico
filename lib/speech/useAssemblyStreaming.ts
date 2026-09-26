@@ -14,11 +14,38 @@ import { useCallback, useRef } from "react";
  */
 const SAMPLE_RATE = 16_000;
 
+/**
+ * AssemblyAI rejects any audio message outside 50-1000 ms. A render quantum
+ * is 128 samples, which at 16 kHz is 8 ms, so posting every quantum straight out
+ * makes the server reject every single frame with an input-duration
+ * violation. The worklet therefore accumulates whole chunks and only posts
+ * once it has a compliant one.
+ */
+const CHUNK_MS = 100;
+const CHUNK_SAMPLES = (SAMPLE_RATE * CHUNK_MS) / 1000; // 1600 samples @ 16 kHz
+
 const WORKLET_SOURCE = `
+const CHUNK = ${CHUNK_SAMPLES};
 class PcmTap extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this._buf = new Float32Array(CHUNK);
+    this._n = 0;
+  }
   process(inputs) {
     const ch = inputs[0] && inputs[0][0];
-    if (ch) this.port.postMessage(new Float32Array(ch));
+    if (!ch || ch.length === 0) return true;
+    let i = 0;
+    while (i < ch.length) {
+      const take = Math.min(CHUNK - this._n, ch.length - i);
+      this._buf.set(ch.subarray(i, i + take), this._n);
+      this._n += take;
+      i += take;
+      if (this._n === CHUNK) {
+        this.port.postMessage(this._buf.slice(0));
+        this._n = 0;
+      }
+    }
     return true;
   }
 }
@@ -47,8 +74,13 @@ export function useAssemblyStreaming() {
   const ctx = useRef<AudioContext | null>(null);
   const stream = useRef<MediaStream | null>(null);
   const workletUrl = useRef<string | null>(null);
+  const watchdog = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const stop = useCallback(() => {
+    if (watchdog.current) {
+      clearTimeout(watchdog.current);
+      watchdog.current = null;
+    }
     try {
       if (ws.current?.readyState === WebSocket.OPEN) {
         ws.current.send(JSON.stringify({ type: "Terminate" }));
@@ -106,6 +138,7 @@ export function useAssemblyStreaming() {
         ws.current = socket;
 
         let sawAnyTurn = false;
+        let serverRejected = false;
 
         socket.onmessage = (event) => {
           let msg: Record<string, unknown>;
@@ -115,6 +148,9 @@ export function useAssemblyStreaming() {
             return;
           }
           if (msg.type === "Error") {
+            // Stop pumping audio: otherwise a rejected stream produces one
+            // error per chunk, ten times a second.
+            serverRejected = true;
             onError(String(msg.error ?? "Transcription refused the stream."));
             return;
           }
@@ -122,6 +158,10 @@ export function useAssemblyStreaming() {
           const transcript = String(msg.transcript ?? "");
           if (!transcript) return;
           sawAnyTurn = true;
+          if (watchdog.current) {
+            clearTimeout(watchdog.current);
+            watchdog.current = null;
+          }
           if (msg.end_of_turn) onFinal(transcript);
           else onPartial(transcript);
         };
@@ -157,6 +197,7 @@ export function useAssemblyStreaming() {
         const source = audio.createMediaStreamSource(stream.current);
         const tap = new AudioWorkletNode(audio, "pcm-tap");
         tap.port.onmessage = (e: MessageEvent<Float32Array>) => {
+          if (serverRejected || !e.data?.length) return;
           if (socket.readyState === WebSocket.OPEN) socket.send(floatToPcm16(e.data));
         };
 
@@ -168,6 +209,14 @@ export function useAssemblyStreaming() {
         source.connect(tap);
         tap.connect(mute);
         mute.connect(audio.destination);
+
+        // Nothing coming back at all is the failure mode that reads as "the
+        // app just did nothing". Say so instead of listening forever.
+        watchdog.current = setTimeout(() => {
+          onError(
+            "The mic is open but no speech is coming back. Check that the right input device is selected, then try again.",
+          );
+        }, 12_000);
 
         onOpen?.();
       } catch (err) {
