@@ -51,7 +51,7 @@ class OpenVoice implements TtsProvider {
 
     // Synthesis runs in the browser: the Space's endpoint is queued, which
     // needs a websocket and can outlast a serverless function.
-    const out = await synthesiseInBrowser({ text, voiceId: this.voiceId });
+    const out = await synthesiseInBrowser({ text, voiceId: this.voiceId, style: "en_default" });
 
     if (!out.ok) {
       const r = await this.fallback.speak(text, onEnd);

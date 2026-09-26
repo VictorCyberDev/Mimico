@@ -14,7 +14,28 @@
  */
 const SPACE = process.env.NEXT_PUBLIC_OPENVOICE_SPACE ?? "https://myshell-ai-openvoicev2.hf.space";
 const FN_INDEX = 1;
-const STYLE = "default";
+
+/**
+ * Styles are language-scoped. The Space rejects a bare "default" for
+ * English and names the set it accepts, so these are its own values.
+ */
+export const EN_STYLES = ["en_default", "en_us", "en_br", "en_au", "en_in"] as const;
+export type EnStyle = (typeof EN_STYLES)[number];
+
+export const STYLE_LABELS: Record<EnStyle, string> = {
+  en_default: "Default",
+  en_us: "American",
+  en_br: "British",
+  en_au: "Australian",
+  en_in: "Indian",
+};
+
+/**
+ * OpenVoice refuses very short prompts with "Please give a longer prompt
+ * text". Checked before joining the queue so a doomed request never costs
+ * a queue slot or a minute of the user's time.
+ */
+export const MIN_PROMPT_CHARS = 30;
 
 export type BrowserCloneResult =
   | { ok: true; blob: Blob }
@@ -36,14 +57,23 @@ async function blobToDataUri(blob: Blob): Promise<string> {
 export async function synthesiseInBrowser({
   text,
   voiceId,
+  style = "en_default",
   onProgress,
   timeoutMs = 180_000,
 }: {
   text: string;
   voiceId: string;
+  style?: EnStyle;
   onProgress?: (stage: string) => void;
   timeoutMs?: number;
 }): Promise<BrowserCloneResult> {
+  if (text.trim().length < MIN_PROMPT_CHARS) {
+    return {
+      ok: false,
+      reason: `The voice model needs at least ${MIN_PROMPT_CHARS} characters to clone from. Try a longer sentence.`,
+    };
+  }
+
   const held: { ws: WebSocket | null } = { ws: null };
   try {
     onProgress?.("Fetching your voice sample…");
@@ -101,7 +131,7 @@ export async function synthesiseInBrowser({
                 session_hash: hash,
                 data: [
                   text,
-                  STYLE,
+                  style,
                   { name: "reference.webm", data: dataUri, is_file: false },
                   // The Space's own terms checkbox; it refuses to run without it.
                   true,
@@ -125,8 +155,14 @@ export async function synthesiseInBrowser({
             const info = typeof data[0] === "string" ? data[0] : "";
             const audio = data[1] as { name?: string } | string | null;
             const path = typeof audio === "string" ? audio : audio?.name;
-            if (!path) {
-              done(() => reject(new Error(info ? `Voice model declined: ${info}` : "No audio came back.")));
+            // Info carries [ERROR] even when a path comes back, so trust it
+            // over the presence of a file.
+            const failed = /\[ERROR\]/i.test(info);
+            if (!path || failed) {
+              const detail = info.replace(/\s+/g, " ").trim();
+              done(() =>
+                reject(new Error(detail ? `Voice model declined: ${detail}` : "No audio came back.")),
+              );
               return;
             }
             done(() => resolve(path));

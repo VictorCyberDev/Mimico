@@ -4,7 +4,13 @@ import { useCallback, useState } from "react";
 import { VoiceRecorder } from "./VoiceRecorder";
 import { FormError } from "@/components/auth/FormError";
 import { CloseIcon, InfoIcon } from "@/components/ui/icons";
-import { synthesiseInBrowser } from "@/lib/voice/openvoiceBrowser";
+import {
+  synthesiseInBrowser,
+  EN_STYLES,
+  STYLE_LABELS,
+  MIN_PROMPT_CHARS,
+  type EnStyle,
+} from "@/lib/voice/openvoiceBrowser";
 
 export type VoiceRow = {
   id: string;
@@ -42,6 +48,7 @@ export function VoiceStudio({
   const [notice, setNotice] = useState<string | null>(null);
   const [last, setLast] = useState<{ id: string; text: string; downloadable: boolean } | null>(null);
   const [stage, setStage] = useState<string | null>(null);
+  const [style, setStyle] = useState<EnStyle>("en_default");
 
   const refresh = useCallback(async () => {
     try {
@@ -74,7 +81,7 @@ export function VoiceStudio({
     try {
       if (voiceId) {
         // Cloned voice: render in the browser, then keep the file.
-        const out = await synthesiseInBrowser({ text: line, voiceId, onProgress: setStage });
+        const out = await synthesiseInBrowser({ text: line, voiceId, style, onProgress: setStage });
         if (out.ok) {
           const form = new FormData();
           form.set("text", line);
@@ -120,6 +127,8 @@ export function VoiceStudio({
   }
 
   const cloned = voices.filter((v) => v.kind === "cloned");
+  // A cloned render needs a minimum prompt length; the preview voice does not.
+  const tooShort = Boolean(voiceId) && text.trim().length > 0 && text.trim().length < MIN_PROMPT_CHARS;
 
   return (
     <div className="mx-auto w-full max-w-[860px] px-6 py-10">
@@ -151,16 +160,37 @@ export function VoiceStudio({
               </option>
             ))}
           </select>
+          {voiceId && (
+            <select
+              className="field"
+              style={{ paddingRight: 36 }}
+              value={style}
+              onChange={(e) => setStyle(e.target.value as EnStyle)}
+              aria-label="Accent"
+            >
+              {EN_STYLES.map((st) => (
+                <option key={st} value={st}>
+                  {STYLE_LABELS[st]}
+                </option>
+              ))}
+            </select>
+          )}
           <button
             type="button"
             className="btn btn-primary"
             onClick={convert}
-            disabled={busy || !text.trim()}
-            style={busy || !text.trim() ? { opacity: 0.55 } : undefined}
+            disabled={busy || !text.trim() || tooShort}
+            style={busy || !text.trim() || tooShort ? { opacity: 0.55 } : undefined}
           >
             {busy ? (stage ?? "Rendering…") : "Speak it"}
           </button>
         </div>
+        {tooShort && (
+          <p className="mono-label mt-3" style={{ color: "var(--caution)" }}>
+            {MIN_PROMPT_CHARS - text.trim().length} more characters needed to clone this
+          </p>
+        )}
+
         {last && (
           <div
             className="fade-pop mt-4 flex flex-wrap items-center justify-between gap-3"
