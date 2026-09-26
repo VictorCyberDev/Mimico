@@ -1,11 +1,9 @@
 import { headers } from "next/headers";
 import { getSessionSafe } from "@/lib/auth/session";
 import { db, newId } from "@/lib/db";
+import { synthesise } from "@/lib/voice/openvoice";
 
 export const maxDuration = 45;
-
-const SPACE = process.env.OPENVOICE_SPACE ?? "https://myshell-ai-openvoice.hf.space";
-const FN = process.env.OPENVOICE_FN ?? "/predict";
 
 export async function GET() {
   const session = await getSessionSafe(await headers());
@@ -60,56 +58,15 @@ export async function POST(req: Request) {
   const voice = rows[0];
   if (!voice) return Response.json({ error: "That voice no longer exists." }, { status: 404 });
 
-  let audio: Buffer | null = null;
-  let mime: string | null = null;
-  let notice: string | null = null;
+  const result = await synthesise({
+    text,
+    sample: Buffer.from(voice.sampleAudio),
+    sampleMime: voice.sampleMime ?? "audio/webm",
+  });
 
-  try {
-    const sampleB64 = Buffer.from(voice.sampleAudio).toString("base64");
-    const queued = await fetch(`${SPACE}/gradio_api/call${FN}`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(process.env.HF_TOKEN ? { authorization: `Bearer ${process.env.HF_TOKEN}` } : {}),
-      },
-      body: JSON.stringify({
-        data: [
-          text,
-          "English",
-          { url: `data:${voice.sampleMime ?? "audio/webm"};base64,${sampleB64}`, meta: { _type: "gradio.FileData" } },
-          false,
-        ],
-      }),
-      signal: AbortSignal.timeout(20_000),
-    });
-    if (!queued.ok) throw new Error(`Space returned ${queued.status}`);
-
-    const { event_id: eventId } = (await queued.json()) as { event_id?: string };
-    if (!eventId) throw new Error("Space returned no event id");
-
-    const streamed = await fetch(`${SPACE}/gradio_api/call${FN}/${eventId}`, {
-      headers: process.env.HF_TOKEN ? { authorization: `Bearer ${process.env.HF_TOKEN}` } : {},
-      signal: AbortSignal.timeout(30_000),
-    });
-    const body = await streamed.text();
-    const line = body.split("\n").reverse().find((l) => l.startsWith("data: "));
-    if (!line) throw new Error("Space returned no audio");
-
-    const parsed = JSON.parse(line.slice(6)) as unknown[];
-    const out = parsed.find(
-      (v): v is { url?: string; path?: string } =>
-        typeof v === "object" && v !== null && ("url" in v || "path" in v),
-    );
-    const url = out?.url ?? (out?.path ? `${SPACE}/gradio_api/file=${out.path}` : null);
-    if (!url) throw new Error("Space returned no audio url");
-
-    const fetched = await fetch(url, { signal: AbortSignal.timeout(20_000) });
-    if (!fetched.ok) throw new Error(`Could not download the rendered audio (${fetched.status})`);
-    audio = Buffer.from(await fetched.arrayBuffer());
-    mime = fetched.headers.get("content-type") ?? "audio/wav";
-  } catch (err) {
-    notice = err instanceof Error ? err.message : String(err);
-  }
+  const audio = result.ok ? result.audio : null;
+  const mime = result.ok ? result.mime : null;
+  const notice = result.ok ? null : result.reason;
 
   const source = audio ? "cloned" : "preview";
   await db().query(

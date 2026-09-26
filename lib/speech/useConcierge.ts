@@ -13,13 +13,14 @@ export function useConcierge() {
   const s = useAssistant();
   const { start, stop } = useAssemblyStreaming();
   const [speakingText, setSpeakingText] = useState<string | null>(null);
-  const referenceClip = useRef<string | null>(null);
+  const activeVoiceId = useRef<string | null>(null);
   const tts = useRef(makeTts(null));
 
-  const setReferenceClip = useCallback((url: string | null) => {
-    referenceClip.current = url;
-    tts.current = makeTts(url);
-    useAssistant.getState().setCloneReady(Boolean(url));
+  /** Point the talk loop at a saved voice, or null for the preview voice. */
+  const setActiveVoice = useCallback((voiceId: string | null) => {
+    activeVoiceId.current = voiceId;
+    tts.current = makeTts(voiceId);
+    useAssistant.getState().setCloneReady(Boolean(voiceId));
   }, []);
 
   const respond = useCallback(
@@ -107,5 +108,5 @@ export function useConcierge() {
 
   const sendText = useCallback((text: string) => void respond(text), [respond]);
 
-  return { speakingText, tapMic, sendText, setReferenceClip, status: s.status };
+  return { speakingText, tapMic, sendText, setActiveVoice, status: s.status };
 }

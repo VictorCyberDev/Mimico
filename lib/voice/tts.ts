@@ -38,10 +38,10 @@ class OpenVoice implements TtsProvider {
   private audio: HTMLAudioElement | null = null;
   private fallback = new BrowserVoice();
 
-  constructor(private referenceClip: string | null) {}
+  constructor(private voiceId: string | null) {}
 
   async speak(text: string, onEnd: () => void): Promise<VoiceResult> {
-    if (!this.referenceClip) {
+    if (!this.voiceId) {
       const r = await this.fallback.speak(text, onEnd);
       return { ...r, notice: "Preview voice — record a short sample to clone your own." };
     }
@@ -50,15 +50,19 @@ class OpenVoice implements TtsProvider {
       const res = await fetch("/api/voice/clone", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text, referenceAudio: this.referenceClip }),
+        body: JSON.stringify({ text, voiceId: this.voiceId }),
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(body.error ?? `clone failed (${res.status})`);
       }
-      const { url } = (await res.json()) as { url: string };
+      const blobUrl = URL.createObjectURL(await res.blob());
 
-      this.audio = new Audio(url);
+      this.audio = new Audio(blobUrl);
+      this.audio.onended = () => {
+        URL.revokeObjectURL(blobUrl);
+        onEnd();
+      };
       this.audio.onended = onEnd;
       this.audio.onerror = onEnd;
       await this.audio.play();
@@ -82,6 +86,6 @@ class OpenVoice implements TtsProvider {
   }
 }
 
-export function makeTts(referenceClip: string | null): TtsProvider {
-  return new OpenVoice(referenceClip);
+export function makeTts(voiceId: string | null): TtsProvider {
+  return new OpenVoice(voiceId);
 }
